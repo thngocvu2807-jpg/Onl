@@ -12,13 +12,11 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 let browser;
 
-// Danh sách các tên miền quảng cáo cần chặn tải để tiết kiệm RAM
-const blockedDomains = [
-    'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
-    'facebook.net', 'facebook.com', 'analytics', 'tracking'
-];
+// Danh sách chặn quảng cáo nhẹ nhàng (chỉ chặn các domain ad thực sự, không chặn bừa bãi)
+const adDomains = ['doubleclick.net', 'googlesyndication.com', 'googleadservices.com', 'facebook.net'];
 
 async function initBrowser() {
+    console.log("Đang khởi tạo trình duyệt mô phỏng người thật...");
     browser = await puppeteer.launch({
         executablePath: '/usr/bin/chromium',
         headless: true,
@@ -28,26 +26,26 @@ async function initBrowser() {
             '--disable-dev-shm-usage',
             '--disable-gpu',
             '--single-process',
-            '--blink-settings=imagesEnabled=false' // Tắt tải ảnh nặng để siêu mượt (bật lại nếu truyện có ảnh)
+            // KHÔNG tắt tải ảnh nữa để Cloudflare Turnstile không nghi ngờ
         ]
     });
-    console.log("Trình duyệt Ảo Siêu Tốc đã sẵn sàng!");
+    console.log("Trình duyệt ảo đã sẵn sàng!");
 }
 initBrowser();
 
-// Hàm lọc và xuất HTML
+// Hàm trích xuất HTML sạch nhưng giữ nguyên các cấu trúc quan trọng
 async function extractCleanHTML(page) {
     return await page.evaluate(() => {
-        // Dọn dẹp DOM
-        const junk = ['script', 'iframe', 'ins', 'noscript', 'header', 'footer', '.ads', '.ad', '#ads', '[class*="adsense"]'];
+        // Chỉ xóa quảng cáo thực sự, KHÔNG xóa lung tung các thẻ khác
+        const junk = ['script', 'iframe', 'ins', 'noscript', '.ads', '.ad', '#ads', '[class*="adsense"]'];
         junk.forEach(sel => document.querySelectorAll(sel).forEach(el => el.remove()));
         
-        // Chuẩn hóa Link
+        // Chuyển link tương đối thành tuyệt đối
         const baseUrl = window.location.href;
         document.querySelectorAll('[src]').forEach(el => { if(el.getAttribute('src')) el.src = new URL(el.getAttribute('src'), baseUrl).href; });
         document.querySelectorAll('[href]').forEach(el => { if(el.getAttribute('href')) el.href = new URL(el.getAttribute('href'), baseUrl).href; });
         
-        // Bơm thẻ base
+        // Bơm thẻ base để CSS hoạt động chính xác
         const head = document.querySelector('head') || document.body;
         const base = document.createElement('base'); base.href = baseUrl;
         head.insertBefore(base, head.firstChild);
@@ -56,72 +54,96 @@ async function extractCleanHTML(page) {
     });
 }
 
-// Quản lý các tab đang mở
 const userPages = new Map();
 
 io.on('connection', async (socket) => {
-    console.log('Người dùng kết nối:', socket.id);
+    console.log('Thiết bị kết nối:', socket.id);
     
     let page = await browser.newPage();
     userPages.set(socket.id, page);
 
-    // Bật khiên chống quảng cáo và chặn tải thừa
+    // Kỹ thuật ẩn danh: Giả lập biến môi trường giống hệt Chrome của người dùng thật
+    await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.navigator.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['vi-VN', 'vi', 'en-US', 'en'] });
+    });
+
+    // Chặn quảng cáo ở tầng mạng
     await page.setRequestInterception(true);
     page.on('request', (req) => {
         const url = req.url().toLowerCase();
-        const isAd = blockedDomains.some(domain => url.includes(domain));
-        if (isAd || ['font', 'media'].includes(req.resourceType())) {
+        const isAd = adDomains.some(domain => url.includes(domain));
+        if (isAd || req.resourceType() === 'media') {
             req.abort();
         } else {
             req.continue();
         }
     });
 
+    // Sử dụng User-Agent chuẩn của máy tính để không bị phát hiện là bot mobile
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    await page.setViewport({ width: 1280, height: 800 });
 
-    // 1. CHỨC NĂNG TẢI TRANG
+    // 1. CHỨC NĂNG DI CHUYỂN ĐẾN URL
     socket.on('goto_url', async (url) => {
         if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-        socket.emit('status', 'Đang tải siêu tốc...');
+        socket.emit('status', 'Đang tải trang...');
         try {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await new Promise(r => setTimeout(r, 1000)); // Đợi JS của trang render 1 chút
+            // Đợi đến khi mạng ổn định (networkidle2)
+            await page.goto(url, { waitUntil: 'networkidle2', timeout: 40000 });
             socket.emit('render_page', await extractCleanHTML(page));
-        } catch (e) { socket.emit('status', 'Lỗi: Không thể truy cập trang này.'); }
+        } catch (e) { 
+            socket.emit('status', 'Lỗi tải trang. Thử lại sau.'); 
+        }
     });
 
-    // 2. CHỨC NĂNG CLICK
+    // 2. CHỨC NĂNG CLICK (Đã tối ưu hóa cho AJAX - SANGTACVIET)
     socket.on('user_click', async (selector) => {
-        socket.emit('status', 'Đang thực thi lệnh...');
+        socket.emit('status', 'Đang thực thi...');
         try {
-            await Promise.all([
-                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}),
-                page.click(selector).catch(()=>{})
+            // Kiểm tra xem click này có kích hoạt chuyển hướng trang hay không
+            let navigationTriggered = false;
+            
+            const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 8000 })
+                .then(() => { navigationTriggered = true; })
+                .catch(() => {}); // Nếu quá 8s không chuyển trang -> Xác định là click AJAX
+
+            // Thực hiện click
+            await page.click(selector).catch(() => {});
+
+            // Đợi một chút xem có chuyển trang không
+            await Promise.race([
+                navPromise,
+                new Promise(r => setTimeout(r, 2000)) // Đợi tối đa 2s cho các nút AJAX
             ]);
-            await new Promise(r => setTimeout(r, 1000));
+
+            if (!navigationTriggered) {
+                // Nếu là nút bấm AJAX (như nút tải nội dung), đợi thêm 1.5 giây nữa để dữ liệu tải xong hoàn toàn
+                await new Promise(r => setTimeout(r, 1500));
+            }
+
             socket.emit('render_page', await extractCleanHTML(page));
-        } catch (e) { socket.emit('status', 'Lỗi click. Hãy thử lại.'); }
+        } catch (e) { 
+            socket.emit('status', 'Lỗi thực thi click.'); 
+        }
     });
 
-    // 3. (MỚI) CHỨC NĂNG TIÊM MÃ JS TỪ XA
+    // 3. TIÊM MÃ JAVASCRIPT TÙY CHỈNH
     socket.on('inject_js', async (jsCode) => {
-        socket.emit('status', 'Đang tiêm mã JS vào Server...');
+        socket.emit('status', 'Đang tiêm mã JS...');
         try {
-            // Chạy mã JS trực tiếp trên Trình duyệt Puppeteer
             await page.evaluate((code) => {
-                try {
-                    eval(code); // Thực thi mã
-                } catch(err) { console.error("Lỗi JS tiêm vào:", err); }
+                try { eval(code); } catch(err) { console.error(err); }
             }, jsCode);
-            
-            // Chụp lại giao diện sau khi JS chạy xong và gửi về
-            await new Promise(r => setTimeout(r, 500)); 
+            await new Promise(r => setTimeout(r, 1000));
             socket.emit('render_page', await extractCleanHTML(page));
             socket.emit('status', 'Tiêm mã thành công!');
         } catch (e) { socket.emit('status', 'Lỗi tiêm JS'); }
     });
 
-    // 4. (MỚI) ÉP CHẾ ĐỘ BAN ĐÊM (DARK MODE)
+    // 4. ÉP BUỘC CHẾ ĐỘ BAN ĐÊM
     socket.on('force_dark_mode', async () => {
         socket.emit('status', 'Đang chuyển Dark Mode...');
         try {
@@ -137,13 +159,11 @@ io.on('connection', async (socket) => {
         } catch (e) {}
     });
 
-    // Dọn dẹp RAM khi thoát
     socket.on('disconnect', () => {
-        console.log('Đóng tab của:', socket.id);
         const p = userPages.get(socket.id);
         if (p) p.close().catch(()=>{});
         userPages.delete(socket.id);
     });
 });
 
-server.listen(process.env.PORT || 3000, () => console.log('Server đỉnh cao đã chạy'));
+server.listen(process.env.PORT || 3000, () => console.log('Server OK'));
