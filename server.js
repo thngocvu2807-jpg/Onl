@@ -4,11 +4,19 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 
 const app = express();
-app.use(express.json({ limit: '10mb' })); 
-app.use((req, res, next) => { res.setHeader('Access-Control-Allow-Origin', '*'); next(); });
+// Tăng cường bộ nạp để không từ chối gói tin của Android
+app.use(express.json({ limit: '50mb' })); 
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Cấp phép cho Android truy cập tự do (Bỏ chặn CORS)
+app.use((req, res, next) => { 
+    res.setHeader('Access-Control-Allow-Origin', '*'); 
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
+    res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With,content-type');
+    next(); 
+});
 
 let globalBrowser = null;
-// BỘ NHỚ LƯU TRẠNG THÁI CÁC YÊU CẦU ĐANG CHẠY (Để hiển thị lên web)
 const activeJobs = new Map();
 
 async function getBrowser() {
@@ -22,7 +30,6 @@ async function getBrowser() {
     return globalBrowser;
 }
 
-// GIAO DIỆN MÁY CHỦ: Bảng điều khiển giám sát trực quan (Tự làm mới sau 2 giây)
 app.get('/', (req, res) => {
     let jobsHtml = '';
     if (activeJobs.size === 0) {
@@ -54,18 +61,24 @@ app.get('/', (req, res) => {
 });
 
 app.post('/get-text', async (req, res) => {
-    const { url: targetUrl, cookie, userAgent } = req.body;
-    if (!targetUrl) return res.status(400).json({ error: "Thiếu URL" });
-
-    // Tạo ID ngẫu nhiên cho tiến trình này để theo dõi
-    const jobId = Math.random().toString(36).substring(7) + " - " + new URL(targetUrl).hostname;
+    // NGAY LẬP TỨC GHI NHẬN KHI CÓ NGƯỜI GỌI TỚI
+    const targetUrl = req.body.url;
     
+    // Nếu Android gửi lên mà mất URL -> Báo lỗi rác
+    if (!targetUrl) {
+        const errId = "LỖI-" + Math.floor(Math.random() * 1000);
+        activeJobs.set(errId, "❌ Ai đó gửi gói tin rác (Không có URL)");
+        setTimeout(() => activeJobs.delete(errId), 3000);
+        return res.status(400).json({ error: "Thiếu URL" });
+    }
+
+    const jobId = Math.random().toString(36).substring(7) + " - " + new URL(targetUrl).hostname;
     const updateStatus = (msg) => {
         console.log(`[${jobId}] ${msg}`);
         activeJobs.set(jobId, msg);
     };
 
-    updateStatus("Khởi tạo kết nối, chờ Chrome...");
+    updateStatus("Đã nhận lệnh từ App. Chờ khởi động Chrome...");
     let page = null;
     
     try {
@@ -78,9 +91,9 @@ app.post('/get-text', async (req, res) => {
             else req.continue();
         });
 
-        if (userAgent) await page.setUserAgent(userAgent);
-        if (cookie) {
-            const cookieArray = cookie.split(';').map(c => {
+        if (req.body.userAgent) await page.setUserAgent(req.body.userAgent);
+        if (req.body.cookie) {
+            const cookieArray = req.body.cookie.split(';').map(c => {
                 const [name, ...rest] = c.split('=');
                 return { name: name.trim(), value: rest.join('=').trim(), domain: new URL(targetUrl).hostname };
             });
@@ -111,7 +124,7 @@ app.post('/get-text', async (req, res) => {
             return el && el.textContent.trim().length > 150 && !el.textContent.includes('đang tải');
         }, { timeout: 10000 }).catch(() => updateStatus("⚠️ Hết giờ chờ chữ, lấy dữ liệu hiện tại..."));
 
-        updateStatus("Đang X-Quang copy toàn bộ trang web...");
+        updateStatus("Đang X-Quang copy toàn bộ HTML...");
         const fullHtml = await page.evaluate(() => {
             document.querySelectorAll('script, iframe').forEach(s => s.remove());
             return document.documentElement.outerHTML;
@@ -125,8 +138,7 @@ app.post('/get-text', async (req, res) => {
         res.status(500).json({ error: error.message });
     } finally {
         if (page) await page.close().catch(()=>{});
-        // Sau khi xong 3 giây thì xóa khỏi bảng theo dõi
-        setTimeout(() => activeJobs.delete(jobId), 3000); 
+        setTimeout(() => activeJobs.delete(jobId), 4000); 
     }
 });
 
