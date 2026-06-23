@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloud Novel</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { margin: 0; font-family: sans-serif; background: #111; color: #eee; }
+        #control { position: fixed; top: 0; width: 100%; background: #222; padding: 10px; display: flex; box-sizing: border-box; z-index: 9999; }
+        #url-input { flex: 1; padding: 8px; border-radius: 4px; border: 1px solid #444; background: #000; color: #fff; margin-right: 5px; }
+        button { padding: 8px 15px; background: #e94560; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        #status { position: fixed; bottom: 0; width: 100%; text-align: center; padding: 5px; background: #00ff88; color: #000; display: none; z-index: 9999; font-weight: bold; }
+        #view { margin-top: 50px; padding: 10px; background: #fff; color: #000; min-height: 100vh; pointer-events: auto; }
+    </style>
+</head>
+<body>
+    <div id="control">
+        <input type="text" id="url-input" placeholder="Dán link truyện vào đây...">
+        <button onclick="load()">Tải</button>
+    </div>
+    <div id="status"></div>
+    <div id="view"><h3 style="text-align:center;color:#555">Dán link để đọc truyện</h3></div>
+
+    <script>
+        const socket = io();
+        const view = document.getElementById('view');
+        const st = document.getElementById('status');
+        
+        function show(msg, col='#00ff88'){ st.innerText=msg; st.style.background=col; st.style.display='block'; setTimeout(()=>st.style.display='none',3000); }
+        function load() { const u = document.getElementById('url-input').value; if(u) socket.emit('goto_url', u); }
+        
+        socket.on('status', m => show(m, '#ffaa00'));
+        socket.on('render_page', d => { document.title = d.title; view.innerHTML = d.html; show('Tải xong!'); });
+
+        function getSel(el){
+            if(!el || el.nodeType!==1) return null; if(el.id) return '#'+el.id;
+            let path=[]; while(el && el.nodeType===1){
+                let sel=el.nodeName.toLowerCase(); if(el.id){ sel+='#'+el.id; path.unshift(sel); break; }
+                let sib=el, c=1; while(sib=sib.previousElementSibling) if(sib.nodeName.toLowerCase()===el.nodeName.toLowerCase()) c++;
+                sel+=`:nth-of-type(${c})`; path.unshift(sel); el=el.parentNode;
+            } return path.join(' > ');
+        }
+
+        view.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); 
+            const sel = getSel(e.target); if(sel){ show('Đang bấm...', '#ff4444'); socket.emit('user_click', sel); }
+        }, true);
+    </script>
+</body>
+</html>
