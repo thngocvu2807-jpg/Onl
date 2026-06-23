@@ -15,6 +15,7 @@ app.use((req, res, next) => {
 });
 
 let globalBrowser = null;
+// Lưu trữ tiến độ của từng phiên làm việc
 const activeJobs = new Map();
 
 async function getBrowser() {
@@ -28,23 +29,52 @@ async function getBrowser() {
     return globalBrowser;
 }
 
-// Endpoint xử lý tương tác từ Android
-app.post('/process-action', async (req, res) => {
+// 1. ENDPOINT: Nhận lệnh và tạo Mã phiên (Không bắt Android đợi)
+app.post('/start-action', async (req, res) => {
     const { url, cookie, userAgent, selector } = req.body;
-    
     if (!url) return res.status(400).json({ error: "Thiếu URL" });
 
-    const jobId = Math.random().toString(36).substring(7);
-    const updateStatus = (msg) => { console.log(`[${jobId}] ${msg}`); activeJobs.set(jobId, msg); };
-
-    updateStatus(`Nhận lệnh từ Android. Đang tải: ${url}`);
-    let page = null;
+    // Tạo mã phiên ngẫu nhiên
+    const jobId = Math.random().toString(36).substring(2, 10);
     
+    // Ghi nhận trạng thái khởi tạo
+    activeJobs.set(jobId, { status: "🟢 Đã kết nối tới Server. Đang chuẩn bị Chrome...", html: null, error: null });
+    
+    console.log(`\n[${jobId}] 🚀 ANDROID ĐÃ KẾT NỐI - Yêu cầu URL: ${url}`);
+    
+    // Trả mã phiên về cho Android ngay lập tức
+    res.status(200).json({ jobId });
+
+    // --- BẮT ĐẦU CHẠY NGẦM BÊN TRONG MÁY CHỦ ---
+    runPuppeteerTask(jobId, url, cookie, userAgent, selector);
+});
+
+// 2. ENDPOINT: Trả lời trạng thái LIVE khi Android hỏi thăm
+app.get('/status/:jobId', (req, res) => {
+    const job = activeJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Không tìm thấy tiến trình!" });
+    
+    res.status(200).json(job);
+
+    // Nếu đã hoàn thành hoặc lỗi, xóa luôn job để giải phóng RAM máy chủ
+    if (job.html || job.error) {
+        setTimeout(() => activeJobs.delete(req.params.jobId), 5000);
+    }
+});
+
+// --- HÀM XỬ LÝ CHÍNH CỦA MÁY CHỦ ---
+async function runPuppeteerTask(jobId, url, cookie, userAgent, selector) {
+    let page = null;
+    const update = (msg) => {
+        console.log(`[${jobId}] 📡 ${msg}`);
+        const currentJob = activeJobs.get(jobId);
+        if (currentJob) currentJob.status = msg;
+    };
+
     try {
         const browser = await getBrowser();
         page = await browser.newPage();
         
-        // Chặn tải tài nguyên rác cho nhanh
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort();
@@ -60,22 +90,22 @@ app.post('/process-action', async (req, res) => {
             await page.setCookie(...cookieArray);
         }
 
+        update(`Đang truy cập trang web gốc...`);
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
 
-        // 1. NẾU CÓ TRUYỀN SELECTOR -> THỰC HIỆN CÚ CLICK TƯƠNG TỰ NHƯ TRÊN APP
         if (selector) {
-            updateStatus(`Đang click vào phần tử: ${selector}`);
+            update(`Đang thực hiện mô phỏng Click...`);
             try {
                 await page.waitForSelector(selector, { timeout: 5000 });
                 await page.click(selector);
-                await page.waitForTimeout(1500); // Chờ JS trên web phản hồi (tải trang hoặc AJAX)
+                update(`Đã Click. Đang chờ Web phản hồi...`);
+                await page.waitForTimeout(1500); 
             } catch (e) {
-                updateStatus(`Không tìm thấy hoặc không thể click vào: ${selector}`);
+                update(`⚠️ Cảnh báo: Không thể click vào phần tử yêu cầu!`);
             }
         }
 
-        // 2. VƯỢT TƯỜNG LỬA "TẢI NỘI DUNG"
-        updateStatus("Kiểm tra và vượt rào chặn đọc truyện...");
+        update(`Kiểm tra rào cản và ấn nút "Tải nội dung"...`);
         await page.evaluate(async () => {
             const delay = ms => new Promise(res => setTimeout(res, ms));
             await delay(500); 
@@ -86,32 +116,31 @@ app.post('/process-action', async (req, res) => {
             if (btn) btn.click();
         });
 
-        // 3. CHỜ CHỮ XUẤT HIỆN
-        updateStatus("Đang đợi trang web nhả chữ...");
+        update(`Đang chờ Text truyện tải xong...`);
         await page.waitForFunction(() => {
             const el = document.querySelector('#bookcontent') || document.querySelector('#content') || document.querySelector('.contentbox');
             return el && el.textContent.trim().length > 150 && !el.textContent.includes('đang tải');
-        }, { timeout: 10000 }).catch(() => updateStatus("⚠️ Hết giờ chờ, lấy dữ liệu hiện tại..."));
+        }, { timeout: 10000 }).catch(() => update("⚠️ Hết giờ chờ, tiến hành lấy phần chữ hiện tại..."));
 
-        // 4. LẤY MÃ HTML SẠCH
-        updateStatus("Đang X-Quang copy toàn bộ HTML...");
+        update(`Đang X-Quang copy toàn bộ HTML...`);
         const fullHtml = await page.evaluate(() => {
-            // Xóa các script để khi trả về app không bị chạy lại quảng cáo
             document.querySelectorAll('script, iframe').forEach(s => s.remove());
             return document.documentElement.outerHTML;
         });
 
-        updateStatus("✅ Hoàn tất! Trả HTML về Android.");
-        res.status(200).json({ html: fullHtml });
+        update(`✅ THÀNH CÔNG! Đã đóng gói dữ liệu chờ App tải về.`);
+        const finalJob = activeJobs.get(jobId);
+        if (finalJob) finalJob.html = fullHtml; // Gắn HTML vào để Android lấy
 
     } catch (error) {
-        updateStatus(`❌ Lỗi sập nguồn: ${error.message}`);
-        res.status(500).json({ error: error.message });
+        update(`❌ LỖI MÁY CHỦ: ${error.message}`);
+        const errJob = activeJobs.get(jobId);
+        if (errJob) errJob.error = error.message;
     } finally {
         if (page) await page.close().catch(()=>{});
-        setTimeout(() => activeJobs.delete(jobId), 4000); 
+        console.log(`[${jobId}] 🛑 Đóng Tab dọn dẹp RAM.`);
     }
-});
+}
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Máy chủ P2P Proxy hoạt động tại cổng ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Máy chủ Proxy LIVE hoạt động tại cổng ${PORT}`));
