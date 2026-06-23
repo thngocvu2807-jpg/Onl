@@ -32,7 +32,17 @@
         const frame = document.getElementById('view-frame');
         
         function show(msg, col='#00ff88'){ st.innerText=msg; st.style.background=col; st.style.display='block'; setTimeout(()=>st.style.display='none',3000); }
-        function load() { const u = document.getElementById('url-input').value; if(u) socket.emit('goto_url', u); }
+        function load() { 
+            let u = document.getElementById('url-input').value.trim(); 
+            if(!u) return;
+            
+            // Tự động thêm https:// nếu người dùng quên nhập
+            if (!/^https?:\/\//i.test(u)) {
+                u = 'https://' + u;
+            }
+            
+            socket.emit('goto_url', u); 
+        }
         
         socket.on('status', m => show(m, '#ffaa00'));
         
