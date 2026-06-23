@@ -1,36 +1,53 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cloud Novel</title>
     <script src="/socket.io/socket.io.js"></script>
     <style>
-        body { margin: 0; font-family: sans-serif; background: #111; color: #eee; }
-        #control { position: fixed; top: 0; width: 100%; background: #222; padding: 10px; display: flex; box-sizing: border-box; z-index: 9999; }
+        body { margin: 0; font-family: sans-serif; background: #111; overflow: hidden; }
+        #control { position: absolute; top: 0; width: 100%; background: #222; padding: 10px; display: flex; box-sizing: border-box; z-index: 9999; box-shadow: 0 2px 10px rgba(0,0,0,0.5);}
         #url-input { flex: 1; padding: 8px; border-radius: 4px; border: 1px solid #444; background: #000; color: #fff; margin-right: 5px; }
-        button { padding: 8px 15px; background: #e94560; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
-        #status { position: fixed; bottom: 0; width: 100%; text-align: center; padding: 5px; background: #00ff88; color: #000; display: none; z-index: 9999; font-weight: bold; }
-        #view { margin-top: 50px; padding: 10px; background: #fff; color: #000; min-height: 100vh; pointer-events: auto; }
+        button { padding: 8px 15px; background: #e94560; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;}
+        #status { position: fixed; bottom: 0; width: 100%; text-align: center; padding: 8px; background: #00ff88; color: #000; display: none; z-index: 9999; font-weight: bold; }
+        
+        /* Chuyển sang dùng iframe để không phá vỡ CSS trang gốc */
+        #view-frame { width: 100vw; height: 100vh; border: none; padding-top: 55px; box-sizing: border-box; background: #fff;}
     </style>
 </head>
 <body>
     <div id="control">
-        <input type="text" id="url-input" placeholder="Dán link truyện vào đây...">
-        <button onclick="load()">Tải</button>
+        <input type="text" id="url-input" placeholder="Dán link (Vd: https://google.com)...">
+        <button onclick="load()">Đi</button>
     </div>
     <div id="status"></div>
-    <div id="view"><h3 style="text-align:center;color:#555">Dán link để đọc truyện</h3></div>
+    
+    <!-- Iframe chứa nội dung -->
+    <iframe id="view-frame" srcdoc="<h3 style='text-align:center; font-family:sans-serif; color:#555; margin-top:50px;'>Dán link để bắt đầu</h3>"></iframe>
 
     <script>
         const socket = io();
-        const view = document.getElementById('view');
         const st = document.getElementById('status');
+        const frame = document.getElementById('view-frame');
         
         function show(msg, col='#00ff88'){ st.innerText=msg; st.style.background=col; st.style.display='block'; setTimeout(()=>st.style.display='none',3000); }
         function load() { const u = document.getElementById('url-input').value; if(u) socket.emit('goto_url', u); }
         
         socket.on('status', m => show(m, '#ffaa00'));
-        socket.on('render_page', d => { document.title = d.title; view.innerHTML = d.html; show('Tải xong!'); });
+        
+        socket.on('render_page', d => { 
+            document.title = d.title; 
+            
+            // Viết HTML vào bên trong Iframe
+            const doc = frame.contentWindow.document;
+            doc.open();
+            doc.write(d.html);
+            doc.close();
+            
+            show('Tải xong!', '#00ff88');
+            bindIframeEvents(); // Gắn sự kiện click vào bên trong iframe
+        });
 
         function getSel(el){
             if(!el || el.nodeType!==1) return null; if(el.id) return '#'+el.id;
@@ -41,9 +58,19 @@
             } return path.join(' > ');
         }
 
-        view.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); 
-            const sel = getSel(e.target); if(sel){ show('Đang bấm...', '#ff4444'); socket.emit('user_click', sel); }
-        }, true);
+        // Chặn click bên trong iframe và gửi lên server
+        function bindIframeEvents() {
+            const doc = frame.contentWindow.document;
+            doc.addEventListener('click', e => { 
+                e.preventDefault(); 
+                e.stopPropagation(); 
+                const sel = getSel(e.target); 
+                if(sel){ 
+                    show('Đang ra lệnh bấm...', '#ff4444'); 
+                    socket.emit('user_click', sel); 
+                }
+            }, true);
+        }
     </script>
 </body>
 </html>
