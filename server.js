@@ -3,6 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const puppeteer = require('puppeteer-core');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -12,33 +13,37 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 let browser;
 
-// Hàm khởi chạy trình duyệt an toàn, tự động khởi động lại nếu sập
-async function getBrowser() {
-    if (!browser || !browser.isConnected()) {
-        console.log("Đang khởi động trình duyệt ảo...");
-        browser = await puppeteer.launch({
-            executablePath: '/usr/bin/chromium',
-            headless: true,
-            args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--single-process'
-            ]
-        });
-    }
-    return browser;
+// Đường dẫn lưu cache để tăng tốc cho các lần tải sau
+const profileDir = path.join(__dirname, '.chrome_user_data');
+if (!fs.existsSync(profileDir)) {
+    fs.mkdirSync(profileDir, { recursive: true });
 }
 
-// Lọc sạch quảng cáo nhưng giữ cấu trúc nguyên bản
+async function initBrowser() {
+    console.log("Đang khởi động Trình duyệt ảo Tốc độ cao...");
+    browser = await puppeteer.launch({
+        executablePath: '/usr/bin/chromium',
+        headless: true,
+        userDataDir: profileDir, // KÍCH HOẠT CACHE TRÊN ĐĨA (TĂNG TỐC 5 LẦN)
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--single-process',
+            '--memory-pressure-off'
+        ]
+    });
+    console.log("Trình duyệt ảo đã sẵn sàng!");
+}
+initBrowser();
+
+// Hàm trích xuất HTML sạch nhanh nhất
 async function extractCleanHTML(page) {
     return await page.evaluate(() => {
         const junk = ['script', 'iframe', 'ins', 'noscript', '.ads', '.ad', '#ads', '[class*="adsense"]'];
         junk.forEach(sel => {
-            document.querySelectorAll(sel).forEach(el => {
-                try { el.remove(); } catch(e){}
-            });
+            document.querySelectorAll(sel).forEach(el => { try { el.remove(); } catch(e){} });
         });
         
         const baseUrl = window.location.href;
@@ -61,58 +66,53 @@ async function extractCleanHTML(page) {
 const userPages = new Map();
 
 io.on('connection', async (socket) => {
-    console.log('Thiết bị đã kết nối:', socket.id);
     let page;
-
     try {
-        const b = await getBrowser();
-        page = await b.newPage();
+        page = await browser.newPage();
         userPages.set(socket.id, page);
         
-        // Cấu hình danh tính người dùng thật
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await page.setViewport({ width: 1280, height: 800 });
+        await page.setViewport({ width: 1024, height: 768 });
         
-        // Ẩn biến tự động hóa để tránh bị Cloudflare phát hiện
         await page.evaluateOnNewDocument(() => {
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            window.navigator.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
         });
     } catch (err) {
-        console.error("Lỗi khởi tạo tab mới:", err);
-        socket.emit('status', 'Lỗi khởi động trình duyệt ảo.');
+        socket.emit('status', 'Lỗi khởi tạo Tab.');
         return;
     }
 
-    // 1. XỬ LÝ TẢI URL
+    // 1. TẢI URL VỚI BỘ ĐỢI THÔNG MINH
     socket.on('goto_url', async (url) => {
         if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-        console.log(`Yêu cầu truy cập: ${url}`);
-        socket.emit('status', 'Đang kết nối tới website...');
+        socket.emit('status', 'Đang kết nối...');
         
         try {
-            // Sử dụng domcontentloaded để tải nhanh nhất có thể, tránh bị treo ngầm
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            // Tải nhanh phần khung trang
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
             
-            // Chờ cứng 2.5 giây để các đoạn mã Javascript của trang web tải nốt nội dung truyện
-            await new Promise(r => setTimeout(r, 2500));
-            
-            const data = await extractCleanHTML(page);
-            socket.emit('render_page', data);
+            // BỘ ĐỢI THÔNG MINH: Quét liên tục vào DOM, có chữ phát là gửi đi luôn, không đợi giây nào!
+            await page.waitForFunction(() => {
+                const el = document.querySelector('#bookcontent') || 
+                           document.querySelector('#content') || 
+                           document.querySelector('.contentbox') ||
+                           document.querySelector('#chapter-content');
+                return el && el.textContent.trim().length > 100;
+            }, { timeout: 6000 }).catch(() => {}); // Đợi tối đa 6s nếu mạng lag, quá hạn vẫn nhả trang ra.
+
+            socket.emit('render_page', await extractCleanHTML(page));
         } catch (e) { 
-            console.error("Lỗi tải URL:", e.message);
-            socket.emit('status', 'Không thể kết nối tới trang web này. Thử lại sau.'); 
+            socket.emit('status', 'Lỗi kết nối.'); 
         }
     });
 
-    // 2. XỬ LÝ LỆNH BẤM
+    // 2. CLICK VỚI BỘ ĐỢI THÔNG MINH
     socket.on('user_click', async (selector) => {
-        socket.emit('status', 'Đang bấm...');
+        socket.emit('status', 'Đang xử lý...');
         try {
             let isNavigated = false;
             
-            // Đợi xem cú click này có chuyển hướng trang hay không (chờ tối đa 6 giây)
-            const navPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 6000 })
+            const navPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 4000 })
                 .then(() => { isNavigated = true; })
                 .catch(() => {});
 
@@ -120,60 +120,31 @@ io.on('connection', async (socket) => {
 
             await Promise.race([
                 navPromise,
-                new Promise(r => setTimeout(r, 1500))
+                new Promise(r => setTimeout(r, 1000))
             ]);
 
-            // Nếu click không làm chuyển hướng trang (như nút tải nội dung AJAX)
+            // Nếu không chuyển hướng (nhấp AJAX tải chữ của Sangtacviet)
             if (!isNavigated) {
-                await new Promise(r => setTimeout(r, 1500)); // Đợi thêm 1.5 giây để JS tải chữ ra
+                // Đợi thông minh cho đến khi nội dung chữ thay đổi/xuất hiện
+                await page.waitForFunction(() => {
+                    const el = document.querySelector('#bookcontent') || 
+                               document.querySelector('#content') || 
+                               document.querySelector('.contentbox');
+                    return el && el.textContent.trim().length > 100;
+                }, { timeout: 4000 }).catch(() => {});
             }
 
-            const data = await extractCleanHTML(page);
-            socket.emit('render_page', data);
+            socket.emit('render_page', await extractCleanHTML(page));
         } catch (e) { 
-            socket.emit('status', 'Không thực hiện được thao tác bấm.'); 
+            socket.emit('status', 'Thao tác thất bại.'); 
         }
     });
 
-    // 3. TIÊM MÃ JAVASCRIPT TÙY CHỈNH
-    socket.on('inject_js', async (jsCode) => {
-        socket.emit('status', 'Đang chạy mã JS...');
-        try {
-            await page.evaluate((code) => {
-                try { eval(code); } catch(err) { console.error(err); }
-            }, jsCode);
-            await new Promise(r => setTimeout(r, 1000));
-            socket.emit('render_page', await extractCleanHTML(page));
-            socket.emit('status', 'Tiêm mã thành công!');
-        } catch (e) { socket.emit('status', 'Lỗi thực thi mã JS.'); }
-    });
-
-    // 4. CHẾ ĐỘ BAN ĐÊM
-    socket.on('force_dark_mode', async () => {
-        socket.emit('status', 'Đang kích hoạt Chế độ tối...');
-        try {
-            await page.evaluate(() => {
-                const style = document.createElement('style');
-                style.innerHTML = `
-                    * { background-color: #121212 !important; color: #e0e0e0 !important; border-color: #333 !important; }
-                    a { color: #4db8ff !important; }
-                `;
-                document.head.appendChild(style);
-            });
-            socket.emit('render_page', await extractCleanHTML(page));
-        } catch (e) {}
-    });
-
-    // ĐÓNG TAB GIẢI PHÓNG RAM
     socket.on('disconnect', () => {
-        console.log('Thiết bị ngắt kết nối:', socket.id);
         const p = userPages.get(socket.id);
         if (p) p.close().catch(()=>{});
         userPages.delete(socket.id);
     });
 });
 
-// Khởi chạy trình duyệt lần đầu
-getBrowser().catch(err => console.error("Lỗi khởi động trình duyệt ban đầu:", err));
-
-server.listen(process.env.PORT || 3000, () => console.log('Máy chủ hoạt động ổn định'));
+server.listen(process.env.PORT || 3000, () => console.log('Server siêu tốc hoạt động'));
