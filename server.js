@@ -1,16 +1,13 @@
 const express = require('express');
 const http = require('http');
+const { Server } = require('socket.io');
 const puppeteer = require('puppeteer-core');
 const path = require('path');
 const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
-
-app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    next();
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
 let browser;
 const profileDir = path.join(__dirname, '.chrome_user_data');
@@ -18,7 +15,7 @@ if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
 
 async function getBrowser() {
     if (!browser || !browser.isConnected()) {
-        console.log("Khởi chạy Chrome ảo tích hợp Auto-Click...");
+        console.log("Khởi chạy Chrome ảo Đám mây...");
         browser = await puppeteer.launch({
             executablePath: '/usr/bin/chromium',
             headless: true,
@@ -32,71 +29,80 @@ async function getBrowser() {
     return browser;
 }
 
-app.get('/', (req, res) => res.send('<h2 style="color:green;text-align:center;">Trạm Auto-Click Đang Chạy 🟢</h2>'));
+// Lấy HTML sạch gửi về đt
+async function extractCleanHTML(page) {
+    return await page.evaluate(() => {
+        const junk = ['script', 'iframe', 'ins', 'noscript', '.ads', '.ad', '#ads', '[class*="adsense"]'];
+        junk.forEach(sel => document.querySelectorAll(sel).forEach(el => { try { el.remove(); } catch(e){} }));
+        
+        const baseUrl = window.location.href;
+        document.querySelectorAll('[src]').forEach(el => { if(el.getAttribute('src')) el.src = new URL(el.getAttribute('src'), baseUrl).href; });
+        document.querySelectorAll('[href]').forEach(el => { if(el.getAttribute('href')) el.href = new URL(el.getAttribute('href'), baseUrl).href; });
+        
+        const head = document.querySelector('head') || document.body;
+        const base = document.createElement('base'); base.href = baseUrl;
+        head.insertBefore(base, head.firstChild);
+        
+        return { title: document.title, html: document.documentElement.outerHTML };
+    });
+}
 
-app.get('/get-text', async (req, res) => {
-    let targetUrl = req.query.url;
-    if (!targetUrl) return res.status(400).json({ error: "Thiếu URL" });
-    if (!/^https?:\/\//i.test(targetUrl)) targetUrl = 'https://' + targetUrl;
+const userTabs = new Map();
 
-    console.log(`Đang bẻ khóa & Auto-Click: ${targetUrl}`);
+io.on('connection', async (socket) => {
+    console.log('App Android vừa kết nối:', socket.id);
     let page;
+
     try {
         const b = await getBrowser();
         page = await b.newPage();
+        userTabs.set(socket.id, page);
         
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
-
-        // ========================================================
-        // AI AUTO-CLICKER: TỰ ĐỘNG TÌM NÚT VÀ BẤM THAY NGƯỜI DÙNG
-        // ========================================================
-        await page.evaluate(() => {
-            // 1. Tìm các nút có chữ "tải nội dung", "click", "bấm vào đây"
-            const elements = Array.from(document.querySelectorAll('a, button, div, span, p'));
-            const loadBtn = elements.find(el => {
-                const text = el.innerText.toLowerCase();
-                return text.includes('tải nội dung') || 
-                       text.includes('click để') || 
-                       text.includes('bấm vào đây') || 
-                       text.includes('nhấn vào đây');
-            });
-            
-            if (loadBtn) {
-                loadBtn.click(); // Bấm thẳng vào nút
-            } else {
-                // 2. Nếu không có nút rõ ràng, giả lập bấm vào khung nội dung (Sangtacviet hay dùng trò này)
-                const box = document.querySelector('#bookcontent') || document.querySelector('#content');
-                if (box) box.click();
-            }
-        });
-
-        // ========================================================
-        // CHỜ KẾT QUẢ SAU KHI BẤM (Cho nó 12 giây để tải)
-        // ========================================================
-        await page.waitForFunction(() => {
-            const el = document.querySelector('#bookcontent') || document.querySelector('#content') || document.querySelector('.contentbox');
-            // Điều kiện: Dài hơn 150 ký tự và KHÔNG chứa chữ "đang tải"
-            return el && el.textContent.trim().length > 150 && !el.textContent.includes('đang tải');
-        }, { timeout: 12000 }).catch(() => console.log("Hết hạn chờ chữ (Có thể web đang lag)"));
-
-        // Rút trích HTML siêu sạch
-        const decryptedHtml = await page.evaluate(() => {
-            const el = document.querySelector('#bookcontent') || document.querySelector('#content') || document.querySelector('.contentbox');
-            if (!el) return '';
-            el.querySelectorAll('script, iframe, ins, .ads, #ads').forEach(e => e.remove());
-            return el.innerHTML; // Trả về dạng HTML để giữ nguyên xuống dòng, in đậm...
-        });
-
-        await page.close();
-
-        // Gửi về cho Android
-        res.status(200).json({ html: decryptedHtml });
+        await page.setViewport({ width: 414, height: 896 }); // Kích thước màn hình điện thoại
+        await page.evaluateOnNewDocument(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
     } catch (e) {
-        if (page) await page.close().catch(() => {});
-        res.status(500).json({ error: e.message });
+        socket.emit('status', 'Lỗi khởi tạo Tab trên Server');
+        return;
     }
+
+    // 1. TẢI TRANG
+    socket.on('goto_url', async (url) => {
+        socket.emit('status', 'Đang tải trang qua Đám Mây...');
+        try {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await new Promise(r => setTimeout(r, 1000)); // Đợi render 1s
+            socket.emit('render_page', await extractCleanHTML(page));
+        } catch (e) { socket.emit('status', 'Lỗi tải trang'); }
+    });
+
+    // 2. CLICK VẬT LÝ TỪ APP GỬI LÊN
+    socket.on('user_click', async (selector) => {
+        socket.emit('status', 'Đang bấm...');
+        try {
+            let isNavigated = false;
+            const navPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 5000 })
+                .then(() => { isNavigated = true; }).catch(() => {});
+
+            // Bấm bằng hàm click vật lý của Puppeteer (Chống phát hiện Bot)
+            await page.click(selector).catch(() => {});
+
+            await Promise.race([ navPromise, new Promise(r => setTimeout(r, 1500)) ]);
+
+            // Nếu click AJAX (Sangtacviet tải chữ), đợi thêm 2s cho chữ hiện ra
+            if (!isNavigated) await new Promise(r => setTimeout(r, 2000));
+
+            socket.emit('render_page', await extractCleanHTML(page));
+        } catch (e) { socket.emit('status', 'Lỗi chuyển trang'); }
+    });
+
+    socket.on('disconnect', () => {
+        console.log('App ngắt kết nối:', socket.id);
+        const p = userTabs.get(socket.id);
+        if (p) p.close().catch(()=>{});
+        userTabs.delete(socket.id);
+    });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Trạm chạy ở cổng ${PORT}`));
+server.listen(PORT, () => console.log(`Trạm Live Socket chạy ở cổng ${PORT}`));
