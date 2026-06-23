@@ -1,13 +1,21 @@
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
+
 const path = require('path');
 const fs = require('fs');
+const bodyParser = require('body-parser');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+
+app.use(bodyParser.json({ limit: '50mb' })); // Tăng limit vì cả trang web HTML khá nặng
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    next();
+});
 
 let browser;
 const profileDir = path.join(__dirname, '.chrome_user_data');
@@ -15,94 +23,70 @@ if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
 
 async function getBrowser() {
     if (!browser || !browser.isConnected()) {
-        console.log("Khởi chạy Chrome ảo Đám mây...");
         browser = await puppeteer.launch({
             executablePath: '/usr/bin/chromium',
             headless: true,
             userDataDir: profileDir,
-            args: [
-                '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-                '--disable-gpu', '--single-process', '--memory-pressure-off'
-            ]
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
         });
     }
     return browser;
 }
 
-// Lấy HTML sạch gửi về đt
-async function extractCleanHTML(page) {
-    return await page.evaluate(() => {
-        const junk = ['script', 'iframe', 'ins', 'noscript', '.ads', '.ad', '#ads', '[class*="adsense"]'];
-        junk.forEach(sel => document.querySelectorAll(sel).forEach(el => { try { el.remove(); } catch(e){} }));
-        
-        const baseUrl = window.location.href;
-        document.querySelectorAll('[src]').forEach(el => { if(el.getAttribute('src')) el.src = new URL(el.getAttribute('src'), baseUrl).href; });
-        document.querySelectorAll('[href]').forEach(el => { if(el.getAttribute('href')) el.href = new URL(el.getAttribute('href'), baseUrl).href; });
-        
-        const head = document.querySelector('head') || document.body;
-        const base = document.createElement('base'); base.href = baseUrl;
-        head.insertBefore(base, head.firstChild);
-        
-        return { title: document.title, html: document.documentElement.outerHTML };
-    });
-}
-
-const userTabs = new Map();
-
-io.on('connection', async (socket) => {
-    console.log('App Android vừa kết nối:', socket.id);
+app.post('/get-text', async (req, res) => {
+    let { url: targetUrl, cookie, userAgent } = req.body;
+    if (!targetUrl) return res.status(400).json({ error: "Thiếu URL" });
+    
     let page;
-
     try {
         const b = await getBrowser();
         page = await b.newPage();
-        userTabs.set(socket.id, page);
         
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await page.setViewport({ width: 414, height: 896 }); // Kích thước màn hình điện thoại
-        await page.evaluateOnNewDocument(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
+        // Gắn nhân thân (User Agent & Cookie) từ Android sang máy chủ
+        if(userAgent) await page.setUserAgent(userAgent);
+        if (cookie) {
+            const cookieArray = cookie.split(';').map(c => {
+                const [name, ...rest] = c.split('=');
+                return { name: name.trim(), value: rest.join('=').trim(), domain: new URL(targetUrl).hostname };
+            });
+            await page.setCookie(...cookieArray);
+        }
+
+        // Truy cập web
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+
+        // MÁY CHỦ BẤM NÚT TẢI NỘI DUNG (Đóng vai trò điều khiển)
+        await page.evaluate(async () => {
+            const delay = ms => new Promise(res => setTimeout(res, ms));
+            await delay(1000); 
+            
+            // Tìm và click nút tải nội dung bị chặn
+            const btn = Array.from(document.querySelectorAll('a, button, div, span, p')).find(el => {
+                const txt = el.innerText.toLowerCase();
+                return txt.includes('tải nội dung') || txt.includes('bấm vào đây');
+            });
+            if (btn) btn.click();
+        });
+
+        // Đợi đến khi nội dung truyện bung ra (mất chữ "đang tải")
+        await page.waitForFunction(() => {
+            const el = document.querySelector('#bookcontent') || document.querySelector('#content');
+            return el && el.textContent.trim().length > 200 && !el.textContent.includes('đang tải');
+        }, { timeout: 15000 }).catch(() => {}); // Kể cả timeout cũng không sao, lấy những gì đang có
+
+        // ĐÂY LÀ ĐIỂM KHÁC BIỆT: LẤY TOÀN BỘ CẢ TRANG WEB (X-QUANG)
+        const fullHtml = await page.evaluate(() => {
+            // Xóa bớt script để khi ném về Android không bị load lại các lệnh lỗi của Sangtacviet
+            document.querySelectorAll('script').forEach(s => s.remove());
+            return document.documentElement.outerHTML; // Trả về <html>...toàn bộ...</html>
+        });
+
+        await page.close();
+        res.status(200).json({ html: fullHtml });
     } catch (e) {
-        socket.emit('status', 'Lỗi khởi tạo Tab trên Server');
-        return;
+        if (page) await page.close().catch(() => {});
+        res.status(500).json({ error: e.message });
     }
-
-    // 1. TẢI TRANG
-    socket.on('goto_url', async (url) => {
-        socket.emit('status', 'Đang tải trang qua Đám Mây...');
-        try {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await new Promise(r => setTimeout(r, 1000)); // Đợi render 1s
-            socket.emit('render_page', await extractCleanHTML(page));
-        } catch (e) { socket.emit('status', 'Lỗi tải trang'); }
-    });
-
-    // 2. CLICK VẬT LÝ TỪ APP GỬI LÊN
-    socket.on('user_click', async (selector) => {
-        socket.emit('status', 'Đang bấm...');
-        try {
-            let isNavigated = false;
-            const navPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 5000 })
-                .then(() => { isNavigated = true; }).catch(() => {});
-
-            // Bấm bằng hàm click vật lý của Puppeteer (Chống phát hiện Bot)
-            await page.click(selector).catch(() => {});
-
-            await Promise.race([ navPromise, new Promise(r => setTimeout(r, 1500)) ]);
-
-            // Nếu click AJAX (Sangtacviet tải chữ), đợi thêm 2s cho chữ hiện ra
-            if (!isNavigated) await new Promise(r => setTimeout(r, 2000));
-
-            socket.emit('render_page', await extractCleanHTML(page));
-        } catch (e) { socket.emit('status', 'Lỗi chuyển trang'); }
-    });
-
-    socket.on('disconnect', () => {
-        console.log('App ngắt kết nối:', socket.id);
-        const p = userTabs.get(socket.id);
-        if (p) p.close().catch(()=>{});
-        userTabs.delete(socket.id);
-    });
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Trạm Live Socket chạy ở cổng ${PORT}`));
+server.listen(process.env.PORT || 3000);
