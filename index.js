@@ -144,7 +144,7 @@ async function startFarmBot() {
         };
         
         window.callGeminiAPI = async (prompt) => {
-            const url = \`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=\${window.GEMINI_API_KEY}\`;
+            const url = \`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=\${window.GEMINI_API_KEY}\`;
             try {
                 const res = await fetch(url, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
