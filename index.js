@@ -5,26 +5,111 @@ const https = require('https');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CẤU HÌNH TỪ BIẾN MÔI TRƯỜNG (RENDER ENVIRONMENT VARIABLES)
-const SHARE_CODE = process.env.SHARE_CODE || 'BOT-VIP-9999'; // Mã mời của Bot
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''; // Bắt buộc phải nhập trên Render
-const START_URL = process.env.START_URL || ''; // Link chương đầu tiên bot bắt đầu cày
+const SHARE_CODE = process.env.SHARE_CODE || 'BOT-VIP-9999'; 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''; 
+const START_URL = process.env.START_URL || ''; 
+
+// =========================================================================
+// TRẠM THÔNG TIN THEO DÕI BOT (LƯU TRỮ STATE CHO DASHBOARD)
+// =========================================================================
+let botStatus = {
+    state: 'Đang khởi động...',
+    currentUrl: START_URL,
+    currentChapter: 'Chưa có',
+    totalTranslated: 0,
+    totalErrors: 0,
+    logs: []
+};
+
+// Hàm thêm log để hiển thị ra Dashboard
+function addLog(msg, type = 'info') {
+    const time = new Date().toLocaleTimeString('vi-VN');
+    botStatus.logs.unshift({ time, msg, type });
+    if (botStatus.logs.length > 50) botStatus.logs.pop(); // Giữ tối đa 50 log gần nhất
+    console.log(`[${time}] ${msg}`);
+}
+
+// =========================================================================
+// API & GIAO DIỆN WEB DASHBOARD (XEM TRỰC TIẾP TRÊN LINK RENDER)
+// =========================================================================
+app.get('/api/status', (req, res) => {
+    res.json(botStatus);
+});
 
 app.get('/', (req, res) => {
-    res.send(`🤖 Nông trại Dịch thuật Đang Chạy. Mã mời của Bot là: <b>${SHARE_CODE}</b>`);
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="vi">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>🤖 Trạm Giám Sát Nông Trại AI</title>
+        <style>
+            body { background: #0f172a; color: #cbd5e1; font-family: monospace; margin: 0; padding: 20px; }
+            .container { max-width: 800px; margin: auto; background: #1e293b; padding: 20px; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #334155; }
+            h1 { color: #38bdf8; text-align: center; border-bottom: 2px dashed #334155; padding-bottom: 10px; }
+            .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px; }
+            .card { background: #0f172a; padding: 15px; border-radius: 8px; border: 1px solid #334155; }
+            .label { color: #94a3b8; font-size: 12px; text-transform: uppercase; }
+            .value { color: #fff; font-size: 16px; font-weight: bold; margin-top: 5px; word-break: break-all; }
+            .val-green { color: #10b981; } .val-red { color: #ef4444; } .val-yellow { color: #f59e0b; }
+            #log-box { background: #000; padding: 15px; border-radius: 8px; height: 350px; overflow-y: auto; font-size: 13px; line-height: 1.5; border: 1px solid #334155; }
+            .log-time { color: #64748b; margin-right: 10px; }
+            .log-info { color: #38bdf8; } .log-success { color: #10b981; } .log-error { color: #ef4444; } .log-warn { color: #f59e0b; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🤖 TRẠM GIÁM SÁT P2P FARM BOT</h1>
+            <div class="grid">
+                <div class="card"><div class="label">Mã Mời (Share Code) của Bot:</div><div class="value val-yellow">${SHARE_CODE}</div></div>
+                <div class="card"><div class="label">Trạng Thái Hoạt Động:</div><div class="value" id="ui-state">Đang tải...</div></div>
+                <div class="card"><div class="label">Số chương đã dịch (Thành công):</div><div class="value val-green" id="ui-success">0</div></div>
+                <div class="card"><div class="label">Số lần gặp lỗi / sụp đổ:</div><div class="value val-red" id="ui-errors">0</div></div>
+                <div class="card" style="grid-column: span 2;"><div class="label">Đang làm việc tại URL:</div><div class="value" id="ui-url">Đang tải...</div></div>
+                <div class="card" style="grid-column: span 2;"><div class="label">Tiêu đề chương hiện tại:</div><div class="value val-green" id="ui-chapter">Đang tải...</div></div>
+            </div>
+            <div class="label" style="margin-bottom: 5px;">NHẬT KÝ HỆ THỐNG TRỰC TIẾP (LIVE LOGS):</div>
+            <div id="log-box"></div>
+        </div>
+
+        <script>
+            async function fetchStatus() {
+                try {
+                    const res = await fetch('/api/status');
+                    const data = await res.json();
+                    document.getElementById('ui-state').innerText = data.state;
+                    document.getElementById('ui-url').innerText = data.currentUrl || 'Đã dừng';
+                    document.getElementById('ui-chapter').innerText = data.currentChapter;
+                    document.getElementById('ui-success').innerText = data.totalTranslated;
+                    document.getElementById('ui-errors').innerText = data.totalErrors;
+                    
+                    const logBox = document.getElementById('log-box');
+                    logBox.innerHTML = data.logs.map(l => 
+                        \`<div><span class="log-time">[\${l.time}]</span><span class="log-\${l.type}">\${l.msg}</span></div>\`
+                    ).join('');
+                } catch(e) {}
+            }
+            setInterval(fetchStatus, 2000); // Tự động làm mới mỗi 2 giây
+            fetchStatus();
+        </script>
+    </body>
+    </html>
+    `);
 });
 
 app.listen(PORT, () => {
-    console.log(`Server khởi chạy tại port ${PORT}`);
+    addLog(`Server API khởi chạy thành công tại port ${PORT}`, 'success');
     startAntiSleep();
     if (START_URL && GEMINI_API_KEY) {
         startFarmBot();
     } else {
-        console.log("⚠️ CHỜ CẤU HÌNH: Hãy thêm START_URL và GEMINI_API_KEY vào Environment Variables trên Render.");
+        botStatus.state = 'LỖI CẤU HÌNH';
+        addLog("Thiếu START_URL hoặc GEMINI_API_KEY trong biến môi trường!", 'error');
     }
 });
 
-// Giữ server sống 24/24
+// Giữ server sống
 function startAntiSleep() {
     const MY_URL = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}.onrender.com`;
     setInterval(() => {
@@ -38,23 +123,29 @@ function startAntiSleep() {
 // HỆ THỐNG BOT CÀY CUỐC 24/24
 // =========================================================================
 async function startFarmBot() {
-    console.log(`🚀 BOT KHỞI ĐỘNG! Bắt đầu cày từ: ${START_URL}`);
+    botStatus.state = 'Đang khởi chạy Chrome ảo...';
+    addLog(`Chuẩn bị cào dữ liệu từ: ${START_URL}`, 'info');
     
     const browser = await puppeteer.launch({
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security']
     });
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1366, height: 768 });
 
-    // Truyền biến môi trường vào môi trường trình duyệt ảo
+    // Cấp quyền cho Puppeteer gọi hàm Node.js để cập nhật giao diện Dashboard
+    await page.exposeFunction('reportStatusToNode', (type, message) => {
+        addLog(message, type);
+    });
+
+    // Truyền biến môi trường vào Trình duyệt ảo
     await page.evaluateOnNewDocument(`
         window.BOT_SHARE_CODE = "${SHARE_CODE}";
         window.GEMINI_API_KEY = "${GEMINI_API_KEY}";
     `);
 
-    // Tiêm siêu thuật toán Mã hóa và Phát sóng Nostr y hệt App Android của bạn vào Bot
+    // Tiêm siêu thuật toán Mã hóa và Phát sóng Nostr y hệt App Android
     await page.evaluateOnNewDocument(`
         window.BOT_CRYPTO = {
             bufferToBase64(buffer) {
@@ -100,8 +191,8 @@ async function startFarmBot() {
         window.publishToNostr = async (tagD, contentData) => {
             return new Promise(async (resolve) => {
                 try {
-                    // Tải thư viện Nostr
                     if (!window.NostrTools) {
+                        await window.reportStatusToNode('warn', 'Đang tải thư viện Nostr...');
                         await new Promise(r => {
                             const s = document.createElement('script');
                             s.src = "https://unpkg.com/nostr-tools@1.17.0/lib/nostr.bundle.js";
@@ -112,7 +203,6 @@ async function startFarmBot() {
                     const tools = window.NostrTools;
                     const privateKeyHex = await window.BOT_CRYPTO.hashSHA256(window.BOT_SHARE_CODE);
                     
-                    // Xử lý khóa công khai
                     let pubKeyHex;
                     try { pubKeyHex = tools.getPublicKey(privateKeyHex); } 
                     catch(e) { 
@@ -137,22 +227,27 @@ async function startFarmBot() {
                     }
 
                     const ws = new WebSocket('wss://relay.damus.io');
-                    ws.onopen = () => { ws.send(JSON.stringify(["EVENT", event])); setTimeout(() => { ws.close(); resolve(true); }, 2000); };
+                    ws.onopen = () => { ws.send(JSON.stringify(["EVENT", event])); setTimeout(() => { ws.close(); resolve(true); }, 2500); };
                     ws.onerror = () => resolve(false);
                 } catch (e) { resolve(false); }
             });
         };
         
+        // [TUÂN THỦ YÊU CẦU: KHÓA CỨNG GEMINI 3.1 FLASH LITE]
         window.callGeminiAPI = async (prompt) => {
             const url = \`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=\${window.GEMINI_API_KEY}\`;
             try {
                 const res = await fetch(url, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+                    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.1 } })
                 });
                 const data = await res.json();
+                if (data.error) throw new Error(data.error.message);
                 return data.candidates[0].content.parts[0].text;
-            } catch(e) { return null; }
+            } catch(e) { 
+                await window.reportStatusToNode('error', 'Lỗi gọi API 3.1 Flash Lite: ' + e.message);
+                return null; 
+            }
         };
     `);
 
@@ -160,27 +255,34 @@ async function startFarmBot() {
 
     // VÒNG LẶP CÀY CUỐC VĨNH CỬU
     while (currentUrl) {
-        console.log(`\n⏳ Đang cày chương: ${currentUrl}`);
+        botStatus.currentUrl = currentUrl;
+        botStatus.state = 'Đang tải trang web...';
+        addLog(`Đang truy cập: ${currentUrl}`, 'info');
+        
         try {
             await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
             
-            // Ép Bot tự động thực thi quá trình trích xuất, dịch và đẩy lên Nostr
+            // Chạy kịch bản cào và dịch
             const result = await page.evaluate(async () => {
+                await window.reportStatusToNode('info', 'Trang đã tải, đang tìm kiếm nội dung...');
+                
                 // 1. Trích xuất Text
                 const contentContainer = document.querySelector('article, main, .read-content, .chapter-content, #chapterContent, .text-wrap') || document.body;
-                const rawText = contentContainer.innerText.substring(0, 4000); // Lấy 4000 chữ đầu
+                const rawText = contentContainer.innerText.substring(0, 5000); 
                 
                 let title = document.title;
                 const titleEl = document.querySelector('h1, .chapter-title, .title');
                 if (titleEl) title = titleEl.innerText;
 
-                if (!rawText || rawText.trim().length < 50) return { error: "Không tìm thấy nội dung truyện" };
+                if (!rawText || rawText.trim().length < 50) return { error: "Không tìm thấy nội dung truyện (Text quá ngắn)." };
 
-                // 2. Dịch bằng Gemini
-                const prompt = `Dịch toàn bộ văn bản sau sang Tiếng Việt chuẩn xác, mượt mà. Giữ nguyên định dạng đoạn văn.\n\n[NỘI DUNG]:\n${rawText}`;
+                // 2. Dịch bằng Gemini 3.1 Flash Lite
+                await window.reportStatusToNode('warn', `Bắt đầu gửi ${rawText.length} ký tự cho Gemini 3.1 Flash Lite...`);
+                const prompt = `Bạn là một dịch giả xuất sắc. Dịch toàn bộ văn bản sau sang Tiếng Việt chuẩn xác, mượt mà. Giữ nguyên định dạng đoạn văn.\n\n[NỘI DUNG]:\n${rawText}`;
                 const translatedText = await window.callGeminiAPI(prompt);
                 
-                if (!translatedText) return { error: "Lỗi gọi API Gemini" };
+                if (!translatedText) return { error: "Lỗi phản hồi từ Gemini 3.1 Flash Lite." };
+                await window.reportStatusToNode('success', `Dịch thành công! Kết quả dài ${translatedText.length} ký tự.`);
 
                 // 3. Xây dựng Hash chuẩn hệ sinh thái của App Android
                 const getUrlHash = (url) => {
@@ -204,20 +306,19 @@ async function startFarmBot() {
                 const nidSmart = getSmartNovelId(window.location.href);
                 const smartHash = nidSmart + '_' + cidHash;
 
-                // 4. Phát sóng lên P2P (Bản Dịch DOM + Global Chapter)
+                // 4. Phát sóng lên P2P Nostr
+                await window.reportStatusToNode('warn', 'Đang mã hóa và phát sóng lên trạm P2P Nostr...');
                 const keyUrlHash = await window.BOT_CRYPTO.hashSHA256(cidHash + "_dom_mapping");
                 const keySmartHash = await window.BOT_CRYPTO.hashSHA256(smartHash + "_dom_mapping");
                 
-                // Giả lập từ điển Local Dict để app bên kia ốp vào
-                const fakeLocalDict = { "auto_gen_hash": translatedText }; // Trong thực tế, bot nên chia span hash, nhưng để app hiển thị được ngay, bot gửi luôn nội dung text
-                
+                const fakeLocalDict = { "auto_gen_hash": translatedText }; 
                 const syncPayload = { mapping: fakeLocalDict, text: translatedText, time: Date.now() };
                 
                 await window.publishToNostr(keyUrlHash, syncPayload);
                 await window.publishToNostr(keySmartHash, syncPayload);
 
-                // Publish Global Chapter (Nhật ký chương)
-                const chapPayload = { chapters: [{ id: cidHash, n: "Tài liệu Bot", c: title, u: window.location.href, t: Date.now(), a: "Bot Render", summary: translatedText.substring(0, 300) }], time: Date.now() };
+                // Gửi luôn Log Chương (để app Android của bạn hiển thị ở tab Nhật ký Trang)
+                const chapPayload = { chapters: [{ id: cidHash, n: "Nông trại Bot Tự Động", c: title, u: window.location.href, t: Date.now(), a: "AI 3.1 Flash Lite", summary: translatedText.substring(0, 250) + "..." }], time: Date.now() };
                 const keyChapters = await window.BOT_CRYPTO.hashSHA256("P2P_CHAPTERS_" + window.BOT_SHARE_CODE);
                 await window.publishToNostr(keyChapters, chapPayload);
 
@@ -235,27 +336,34 @@ async function startFarmBot() {
             });
 
             if (result.error) {
-                console.log("❌ Lỗi Bot: " + result.error);
-                break; // Dừng nếu web bị lỗi/hết truyện
+                botStatus.totalErrors++;
+                botStatus.state = 'Lỗi cào dữ liệu!';
+                addLog("❌ Lỗi Bot: " + result.error, 'error');
+                break; // Dừng vòng lặp nếu lỗi nặng
             }
 
-            console.log(`✅ Đã dịch và phát sóng thành công: ${result.title}`);
+            botStatus.totalTranslated++;
+            botStatus.currentChapter = result.title;
+            botStatus.state = 'Hoàn thành chương, đang chờ chuyển tiếp...';
+            addLog(`✅ Đã đẩy thành công lên P2P: ${result.title}`, 'success');
             
             // Chuyển sang chương tiếp theo
             if (result.nextUrl && result.nextUrl.startsWith('http')) {
                 currentUrl = result.nextUrl;
-                // Tạm nghỉ 10 giây để tránh bị Web block và Gemini báo lỗi Rate Limit
-                console.log("💤 Đang nghỉ 10 giây trước khi cày chương tiếp theo...");
+                addLog(`💤 Tạm nghỉ 10 giây để chống Block IP...`, 'warn');
                 await new Promise(r => setTimeout(r, 10000));
             } else {
-                console.log("🎉 ĐÃ HẾT TRUYỆN! Bot tiến vào trạng thái ngủ.");
+                botStatus.state = 'ĐÃ HẾT TRUYỆN';
+                addLog("🎉 KHÔNG TÌM THẤY CHƯƠNG TIẾP THEO. Bot tiến vào trạng thái ngủ.", 'info');
                 currentUrl = null;
             }
 
         } catch (error) {
-            console.error("Lỗi sụp đổ trang, thử lại sau 30s...", error.message);
+            botStatus.totalErrors++;
+            botStatus.state = 'Sụp đổ trình duyệt ảo!';
+            addLog(`Sụp đổ trang web, thử tải lại sau 30 giây... (${error.message})`, 'error');
             await new Promise(r => setTimeout(r, 30000));
-            // Không set currentUrl = null để nó thử lại trang bị lỗi
+            // Cố ý không gán currentUrl = null để nó vòng lại cào lại trang bị lỗi mạng
         }
     }
 }
