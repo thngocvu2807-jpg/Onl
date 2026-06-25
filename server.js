@@ -7,8 +7,12 @@ puppeteer.use(StealthPlugin());
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
-
+const io = new Server(server, {
+    cors: {
+        origin: "*", // Cho phép mọi trang web kết nối tới
+        methods: ["GET", "POST"]
+    }
+});
 // Cấp quyền cho Express truy cập thư mục 'public' chứa file index.html
 app.use(express.static('public')); 
 
