@@ -1,13 +1,13 @@
 {
-  "name": "cloud-browser-p2p",
-  "version": "9.0.0",
-  "description": "Ghost Machine A for P2P Ultimate V9",
+  "name": "p2p-translation-farm",
+  "version": "1.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "puppeteer": "^22.6.0"
+    "puppeteer": "^22.6.0",
+    "dotenv": "^16.4.5"
   }
 }
